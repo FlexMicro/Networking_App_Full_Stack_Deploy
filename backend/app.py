@@ -1,92 +1,103 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS  # Add this import
+from werkzeug.utils import secure_filename
 import boto3
 import os
-import logging
-from werkzeug.utils import secure_filename
-import redis
 from botocore.exceptions import ClientError
+import uuid
+from boto3.session import Session
+from dotenv import load_dotenv
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Enable CORS for all routes
 
-# Initialize S3 client
-try:
-    s3 = boto3.client('s3')
-except Exception as e:
-    logger.error(f"Failed to initialize S3 client: {str(e)}")
-    raise
+# Create a session with your specific profile
+session = Session(profile_name='flex-admin')  # Replace 'myenv' with your profile name
 
-# Initialize Redis client
-try:
-    redis_client = redis.Redis(host='redis', port=6379, db=0)
-except Exception as e:
-    logger.error(f"Failed to initialize Redis client: {str(e)}")
-    raise
+# Create S3 client using the session
+s3_client = session.client('s3')
 
+# Configuration
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+S3_BUCKET = os.getenv('S3_BUCKET')  # You can still keep bucket name in env var if desired
 
 def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
+    # Check if file is present in request
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file part'}), 400
+    
+    file = request.files['file']
+    
+    # Check if a file was selected
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    # Validate file type
+    if not allowed_file(file.filename):
+        return jsonify({'error': 'File type not allowed'}), 400
+    
+    # Check file size
+    file_content = file.read()
+    if len(file_content) > MAX_FILE_SIZE:
+        return jsonify({'error': 'File size exceeds limit'}), 400
+    
+    file.seek(0)  # Reset file pointer after reading
+    
     try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file part'}), 400
-        
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({'error': 'No selected file'}), 400
-            
-        if not allowed_file(file.filename):
-            return jsonify({'error': 'File type not allowed'}), 400
-
+        # Generate unique filename with a folder structure based on date
         filename = secure_filename(file.filename)
+        unique_filename = f"uploads/{uuid.uuid4()}_{filename}"
         
-        # Check if S3 bucket is configured
-        bucket_name = os.getenv('S3_BUCKET')
-        if not bucket_name:
-            logger.error("S3_BUCKET environment variable not set")
-            return jsonify({'error': 'Server configuration error'}), 500
-
-        try:
-            s3.upload_fileobj(
-                file,
-                bucket_name,
-                filename,
-                ExtraArgs={'ACL': 'public-read'}
-            )
-            
-            file_url = f"https://{bucket_name}.s3.amazonaws.com/{filename}"
-            redis_client.lpush('recent_uploads', file_url)
-            
-            logger.info(f"Successfully uploaded file: {filename}")
-            return jsonify({
-                'message': 'File uploaded successfully',
-                'url': file_url
-            })
-            
-        except ClientError as e:
-            logger.error(f"S3 upload error: {str(e)}")
-            return jsonify({'error': 'Failed to upload to S3'}), 500
-            
+        # Upload to S3
+        s3_client.upload_fileobj(
+            file,
+            S3_BUCKET,
+            unique_filename,
+            ExtraArgs={
+                'ContentType': file.content_type
+            }
+        )
+        
+        # Get the region from the s3 client
+        region = s3_client.meta.region_name
+        
+        # Generate the URL of the uploaded file
+        file_url = f"https://{S3_BUCKET}.s3.{region}.amazonaws.com/{unique_filename}"
+        
+        return jsonify({
+            'message': 'File uploaded successfully',
+            'filename': unique_filename,
+            'url': file_url
+        }), 200
+        
+    except ClientError as e:
+        app.logger.error(f"Error uploading to S3: {str(e)}")
+        return jsonify({'error': str(e)}), 500
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        return jsonify({'error': 'Internal server error'}), 500
-
-@app.route('/recent-uploads', methods=['GET'])
-def get_recent_uploads():
-    try:
-        uploads = redis_client.lrange('recent_uploads', 0, -1)
-        return jsonify({'uploads': [url.decode('utf-8') for url in uploads]})
-    except Exception as e:
-        logger.error(f"Error fetching recent uploads: {str(e)}")
-        return jsonify({'error': 'Failed to fetch recent uploads'}), 500
+        app.logger.error(f"Unexpected error: {str(e)}")
+        return jsonify({'error': 'An unexpected error occurred'}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0')
+    # Add startup checks
+    if not S3_BUCKET:
+        raise ValueError("S3_BUCKET environment variable must be set")
+    
+    # Verify credentials at startup
+    try:
+        s3_client.list_buckets()
+        print(f"Successfully connected to AWS using profile: {session.profile_name}")
+        print(f"Using region: {s3_client.meta.region_name}")
+    except Exception as e:
+        print(f"Error verifying AWS credentials: {str(e)}")
+        raise
+    
+    app.run(debug=True)

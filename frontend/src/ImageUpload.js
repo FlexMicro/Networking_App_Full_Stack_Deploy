@@ -1,107 +1,266 @@
-import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import React, { useState, useCallback, useEffect } from 'react';
+import { Upload, X, Image as ImageIcon, AlertCircle } from 'lucide-react';
 
 const ImageUpload = () => {
-  const [selectedFile, setSelectedFile] = useState(null);
-  const [recentUploads, setRecentUploads] = useState([]);
-  const [uploading, setUploading] = useState(false);
+  // State management
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
 
+  // Constants
+  const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+  const VALID_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/jpg'];
+  const UPLOAD_TIMEOUT = 30000; // 30 seconds
+
+  // Cleanup preview URL on unmount
   useEffect(() => {
-    fetchRecentUploads();
+    return () => {
+      if (preview) {
+        URL.revokeObjectURL(preview);
+      }
+    };
+  }, [preview]);
+
+  // Reset success message after 5 seconds
+  useEffect(() => {
+    let timer;
+    if (uploadSuccess) {
+      timer = setTimeout(() => {
+        setUploadSuccess(false);
+      }, 5000);
+    }
+    return () => clearTimeout(timer);
+  }, [uploadSuccess]);
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    const droppedFile = e.dataTransfer.files[0];
+    handleFileSelect(droppedFile);
   }, []);
 
-  const fetchRecentUploads = async () => {
-    try {
-      const { data } = await axios.get(`${process.env.REACT_APP_API_URL}/recent-uploads`);
-      setRecentUploads(data.uploads);
-    } catch (error) {
-      console.error('Error fetching recent uploads:', error);
-      setError('Failed to fetch recent uploads');
-    }
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault();
+  }, []);
+
+  const handleDragEnter = useCallback((e) => {
+    e.preventDefault();
+  }, []);
+
+  const validateFile = (file) => {
+    if (!file) return 'Please select a file';
+    if (!VALID_TYPES.includes(file.type)) 
+      return 'Please select a valid image file (JPG, PNG, or GIF)';
+    if (file.size > MAX_FILE_SIZE) 
+      return 'File size must be less than 5MB';
+    return null;
   };
 
-  const handleFileSelect = (event) => {
-    setSelectedFile(event.target.files[0]);
+  const handleFileSelect = (selectedFile) => {
     setError(null);
-  };
+    setUploadSuccess(false);
+    setUploadProgress(0);
 
-  const handleUpload = async () => {
-    if (!selectedFile) {
-      setError('Please select a file first!');
+    const validationError = validateFile(selectedFile);
+    if (validationError) {
+      setError(validationError);
       return;
     }
 
-    const formData = new FormData();
-    formData.append('file', selectedFile);
+    setFile(selectedFile);
 
-    setUploading(true);
+    // Create preview
+    const previewUrl = URL.createObjectURL(selectedFile);
+    setPreview(previewUrl);
+  };
+
+  const handleUpload = async () => {
+    if (!file) {
+      setError('Please select a file first');
+      return;
+    }
+
+    setLoading(true);
     setError(null);
-    
+    setUploadSuccess(false);
+    setUploadProgress(0);
+
+    const formData = new FormData();
+    formData.append('file', file);
+
     try {
-      const { data } = await axios.post(
-        `${process.env.REACT_APP_API_URL}/upload`,
-        formData,
-        {
-          headers: {
-            'Content-Type': 'multipart/form-data',
-          },
-        }
-      );
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT);
+
+      const response = await fetch('http://localhost:5000/upload', {
+        method: 'POST',
+        body: formData,
+        signal: controller.signal,
+        headers: {
+          'Accept': 'application/json',
+        },
+      });
+
+      clearTimeout(timeoutId);
+
+      const responseText = await response.text();
+      let data;
       
-      setSelectedFile(null);
-      fetchRecentUploads();
-      alert('File uploaded successfully!');
-    } catch (error) {
-      console.error('Error uploading file:', error.response?.data?.error || error.message);
-      setError(error.response?.data?.error || 'Error uploading file');
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {
+        console.error('Failed to parse response:', responseText);
+        throw new Error('Invalid response from server');
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Upload failed');
+      }
+
+      setUploadSuccess(true);
+      console.log('Upload successful:', data.url);
+      
+      // Optional: Clear form after successful upload
+      // clearFile();
+      
+    } catch (err) {
+      console.error('Upload error:', err);
+      if (err.name === 'AbortError') {
+        setError('Upload timed out. Please try again.');
+      } else {
+        setError(err.message || 'An error occurred during upload');
+      }
     } finally {
-      setUploading(false);
+      setLoading(false);
+      setUploadProgress(0);
     }
   };
 
+  const clearFile = () => {
+    if (preview) {
+      URL.revokeObjectURL(preview);
+    }
+    setFile(null);
+    setPreview(null);
+    setError(null);
+    setUploadSuccess(false);
+    setUploadProgress(0);
+  };
+
   return (
-    <div className="p-4">
-      <h2 className="text-xl font-bold mb-4">Upload Image to S3</h2>
-      
+    <div className="w-full max-w-xl mx-auto p-6">
+      {/* Upload Area */}
+      <div 
+        className={`
+          border-2 border-dashed rounded-lg p-6 text-center 
+          ${error ? 'border-red-400' : 'border-gray-300'} 
+          hover:border-gray-400 transition-colors
+          ${file ? 'bg-gray-50' : 'bg-white'}
+          ${loading ? 'opacity-50 pointer-events-none' : ''}
+        `}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragEnter={handleDragEnter}
+      >
+        {!file ? (
+          <div className="space-y-4">
+            <div className="flex justify-center">
+              <ImageIcon className="h-12 w-12 text-gray-400" />
+            </div>
+            <div>
+              <label className="cursor-pointer text-blue-500 hover:text-blue-600">
+                <span>Choose a file</span>
+                <input
+                  type="file"
+                  className="hidden"
+                  accept="image/*"
+                  onChange={(e) => handleFileSelect(e.target.files[0])}
+                  disabled={loading}
+                />
+              </label>
+              <p className="text-gray-500 mt-2">or drag and drop</p>
+            </div>
+            <p className="text-sm text-gray-500">
+              PNG, JPG, GIF up to 5MB
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {preview && (
+              <div className="relative w-48 h-48 mx-auto">
+                <img
+                  src={preview}
+                  alt="Preview"
+                  className="w-full h-full object-cover rounded"
+                />
+                <button
+                  onClick={clearFile}
+                  className="absolute -top-2 -right-2 p-1 bg-red-500 rounded-full text-white hover:bg-red-600"
+                  disabled={loading}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+            <div className="text-sm text-gray-500">
+              {file.name}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Error Message */}
       {error && (
-        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-2 rounded mb-4">
+        <div className="mt-4 p-3 bg-red-100 text-red-700 rounded flex items-center">
+          <AlertCircle className="h-5 w-5 mr-2" />
           {error}
         </div>
       )}
-      
-      <div className="mb-4">
-        <input 
-          type="file" 
-          accept="image/*" 
-          onChange={handleFileSelect}
-          className="mb-2"
-        />
-        <button 
-          onClick={handleUpload}
-          disabled={!selectedFile || uploading}
-          className={`px-4 py-2 rounded ${
-            !selectedFile || uploading 
-              ? 'bg-gray-300 cursor-not-allowed' 
-              : 'bg-blue-500 hover:bg-blue-600 text-white'
-          }`}
-        >
-          {uploading ? 'Uploading...' : 'Upload'}
-        </button>
-      </div>
 
-      <h3 className="text-lg font-semibold mb-2">Recent Uploads</h3>
-      <div className="grid grid-cols-2 gap-4">
-        {recentUploads.map((url, index) => (
-          <div key={index} className="border rounded p-2">
-            <img 
-              src={url} 
-              alt={`Upload ${index + 1}`} 
-              className="w-full h-48 object-cover rounded"
+      {/* Success Message */}
+      {uploadSuccess && (
+        <div className="mt-4 p-3 bg-green-100 text-green-700 rounded">
+          File uploaded successfully!
+        </div>
+      )}
+
+      {/* Upload Progress */}
+      {uploadProgress > 0 && uploadProgress < 100 && (
+        <div className="mt-4">
+          <div className="h-2 bg-gray-200 rounded">
+            <div 
+              className="h-full bg-blue-500 rounded transition-all duration-300"
+              style={{ width: `${uploadProgress}%` }}
             />
           </div>
-        ))}
-      </div>
+        </div>
+      )}
+
+      {/* Upload Button */}
+      <button
+        onClick={handleUpload}
+        disabled={!file || loading}
+        className={`
+          mt-4 w-full flex items-center justify-center px-4 py-2 rounded
+          ${loading ? 'bg-gray-400' : 'bg-blue-500 hover:bg-blue-600'}
+          text-white transition-colors
+          disabled:opacity-50 disabled:cursor-not-allowed
+        `}
+      >
+        {loading ? (
+          <div className="flex items-center">
+            <div className="animate-spin rounded-full h-5 w-5 border-2 border-b-transparent border-white mr-2" />
+            Uploading...
+          </div>
+        ) : (
+          <div className="flex items-center">
+            <Upload className="h-5 w-5 mr-2" />
+            Upload Image
+          </div>
+        )}
+      </button>
     </div>
   );
 };
