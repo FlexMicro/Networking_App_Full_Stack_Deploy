@@ -22,7 +22,7 @@ services:
       # Mount the AWS credentials from the host if running on EC2/ECS
       - ~/.aws:/root/.aws:ro
       # Mount the instance metadata directory if running on EC2
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/aws/:/var/run/aws/:ro
     environment:
       - S3_BUCKET=mytest274984
     depends_on:

@@ -1,12 +1,13 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import boto3
 from botocore.exceptions import NoCredentialsError
 import os
 from werkzeug.utils import secure_filename
-from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)  # En
+CORS(app)
+
 # Configure upload folder
 UPLOAD_FOLDER = '/tmp'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
@@ -18,56 +19,52 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def get_s3_client():
+    """
+    Create an S3 client using instance profile credentials
+    """
+    session = boto3.Session()
+    return session.client('s3',
+                         region_name='us-east-1')  # Replace with your region
+
 def upload_to_s3(local_file, bucket, s3_file):
     """
-    Upload a file to an S3 bucket.
-    
-    :param local_file: Path to the local file
-    :param bucket: S3 bucket name
-    :param s3_file: S3 object name
-    :return: True if file was uploaded, else False
+    Upload a file to an S3 bucket using instance profile credentials
     """
-    s3_client = boto3.client('s3')
-    
     try:
+        s3_client = get_s3_client()
         s3_client.upload_file(local_file, bucket, s3_file)
-        return True, "Upload Successful"
-    except FileNotFoundError:
-        return False, "File not found"
+        # Get the public URL of the uploaded file
+        location = s3_client.get_bucket_location(Bucket=bucket)['LocationConstraint']
+        region = location if location else 'us-east-1'
+        url = f"https://{bucket}.s3.{region}.amazonaws.com/{s3_file}"
+        return True, "Upload Successful", url
     except NoCredentialsError:
-        return False, "AWS credentials not available"
+        return False, "Could not find AWS credentials", None
     except Exception as e:
-        return False, str(e)
+        return False, str(e), None
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
-    # Check if file is present in request
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
     
     file = request.files['file']
     
-    # Check if file was selected
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
     
-    # Check if file type is allowed
     if not allowed_file(file.filename):
         return jsonify({'error': 'File type not allowed'}), 400
     
     try:
-        # Secure the filename
         filename = secure_filename(file.filename)
-        
-        # Save file temporarily
         temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(temp_path)
         
-        # Upload to S3
         bucket_name = "mytest274984"
-        success, message = upload_to_s3(temp_path, bucket_name, filename)
+        success, message, url = upload_to_s3(temp_path, bucket_name, filename)
         
-        # Clean up temporary file
         os.remove(temp_path)
         
         if success:
@@ -75,7 +72,7 @@ def upload_file():
                 'message': 'File uploaded successfully',
                 'filename': filename,
                 'bucket': bucket_name,
-                's3_path': f's3://{bucket_name}/{filename}'
+                's3_path': url
             }), 200
         else:
             return jsonify({'error': message}), 500
@@ -88,6 +85,5 @@ def health_check():
     return jsonify({'status': 'healthy'}), 200
 
 if __name__ == '__main__':
-    # Create upload folder if it doesn't exist
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000)
