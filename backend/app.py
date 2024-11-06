@@ -1,33 +1,43 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS  # Add this import
-from werkzeug.utils import secure_filename
 import boto3
+from botocore.exceptions import NoCredentialsError
 import os
-from botocore.exceptions import ClientError
-import uuid
-from boto3.session import Session
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
+from werkzeug.utils import secure_filename
+from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
-
-# Create a session with your specific profile
-session = Session(profile_name='flex-admin')  # Replace 'myenv' with your profile name
-
-# Create S3 client using the session
-s3_client = session.client('s3')
-
-# Configuration
+CORS(app)  # En
+# Configure upload folder
+UPLOAD_FOLDER = '/tmp'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
-S3_BUCKET = os.getenv('S3_BUCKET')  # You can still keep bucket name in env var if desired
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max-limit
 
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def upload_to_s3(local_file, bucket, s3_file):
+    """
+    Upload a file to an S3 bucket.
+    
+    :param local_file: Path to the local file
+    :param bucket: S3 bucket name
+    :param s3_file: S3 object name
+    :return: True if file was uploaded, else False
+    """
+    s3_client = boto3.client('s3')
+    
+    try:
+        s3_client.upload_file(local_file, bucket, s3_file)
+        return True, "Upload Successful"
+    except FileNotFoundError:
+        return False, "File not found"
+    except NoCredentialsError:
+        return False, "AWS credentials not available"
+    except Exception as e:
+        return False, str(e)
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -37,67 +47,47 @@ def upload_file():
     
     file = request.files['file']
     
-    # Check if a file was selected
+    # Check if file was selected
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
     
-    # Validate file type
+    # Check if file type is allowed
     if not allowed_file(file.filename):
         return jsonify({'error': 'File type not allowed'}), 400
     
-    # Check file size
-    file_content = file.read()
-    if len(file_content) > MAX_FILE_SIZE:
-        return jsonify({'error': 'File size exceeds limit'}), 400
-    
-    file.seek(0)  # Reset file pointer after reading
-    
     try:
-        # Generate unique filename with a folder structure based on date
+        # Secure the filename
         filename = secure_filename(file.filename)
-        unique_filename = f"uploads/{uuid.uuid4()}_{filename}"
+        
+        # Save file temporarily
+        temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(temp_path)
         
         # Upload to S3
-        s3_client.upload_fileobj(
-            file,
-            S3_BUCKET,
-            unique_filename,
-            ExtraArgs={
-                'ContentType': file.content_type
-            }
-        )
+        bucket_name = "mytest274984"
+        success, message = upload_to_s3(temp_path, bucket_name, filename)
         
-        # Get the region from the s3 client
-        region = s3_client.meta.region_name
+        # Clean up temporary file
+        os.remove(temp_path)
         
-        # Generate the URL of the uploaded file
-        file_url = f"https://{S3_BUCKET}.s3.{region}.amazonaws.com/{unique_filename}"
-        
-        return jsonify({
-            'message': 'File uploaded successfully',
-            'filename': unique_filename,
-            'url': file_url
-        }), 200
-        
-    except ClientError as e:
-        app.logger.error(f"Error uploading to S3: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        if success:
+            return jsonify({
+                'message': 'File uploaded successfully',
+                'filename': filename,
+                'bucket': bucket_name,
+                's3_path': f's3://{bucket_name}/{filename}'
+            }), 200
+        else:
+            return jsonify({'error': message}), 500
+            
     except Exception as e:
-        app.logger.error(f"Unexpected error: {str(e)}")
-        return jsonify({'error': 'An unexpected error occurred'}), 500
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy'}), 200
 
 if __name__ == '__main__':
-    # Add startup checks
-    if not S3_BUCKET:
-        raise ValueError("S3_BUCKET environment variable must be set")
-    
-    # Verify credentials at startup
-    try:
-        s3_client.list_buckets()
-        print(f"Successfully connected to AWS using profile: {session.profile_name}")
-        print(f"Using region: {s3_client.meta.region_name}")
-    except Exception as e:
-        print(f"Error verifying AWS credentials: {str(e)}")
-        raise
-    
-    app.run(debug=True)
+    # Create upload folder if it doesn't exist
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)

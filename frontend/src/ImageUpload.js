@@ -1,5 +1,10 @@
+// src/components/ImageUpload.jsx
+
 import React, { useState, useCallback, useEffect } from 'react';
 import { Upload, X, Image as ImageIcon, AlertCircle } from 'lucide-react';
+import toast from 'react-hot-toast';
+
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
 const ImageUpload = () => {
   // State management
@@ -66,6 +71,7 @@ const ImageUpload = () => {
     const validationError = validateFile(selectedFile);
     if (validationError) {
       setError(validationError);
+      toast.error(validationError);
       return;
     }
 
@@ -78,7 +84,9 @@ const ImageUpload = () => {
 
   const handleUpload = async () => {
     if (!file) {
-      setError('Please select a file first');
+      const errorMsg = 'Please select a file first';
+      setError(errorMsg);
+      toast.error(errorMsg);
       return;
     }
 
@@ -94,7 +102,7 @@ const ImageUpload = () => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT);
 
-      const response = await fetch('http://localhost:5000/upload', {
+      const response = await fetch(`${API_URL}/upload`, {
         method: 'POST',
         body: formData,
         signal: controller.signal,
@@ -120,18 +128,20 @@ const ImageUpload = () => {
       }
 
       setUploadSuccess(true);
-      console.log('Upload successful:', data.url);
+      toast.success('File uploaded successfully!');
+      console.log('Upload successful:', data.s3_path);
       
-      // Optional: Clear form after successful upload
-      // clearFile();
+      // Clear form after successful upload
+      clearFile();
       
     } catch (err) {
       console.error('Upload error:', err);
-      if (err.name === 'AbortError') {
-        setError('Upload timed out. Please try again.');
-      } else {
-        setError(err.message || 'An error occurred during upload');
-      }
+      const errorMsg = err.name === 'AbortError' 
+        ? 'Upload timed out. Please try again.'
+        : err.message || 'An error occurred during upload';
+      
+      setError(errorMsg);
+      toast.error(errorMsg);
     } finally {
       setLoading(false);
       setUploadProgress(0);
